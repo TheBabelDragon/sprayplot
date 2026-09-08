@@ -15,6 +15,7 @@ sprayplot_firmware/
   shared/protocol.h          packet structs + constants, included by both sketches
   base_station/base_station.ino
   robot_receiver/robot_receiver.ino
+MOTION.md                   rail trolley + working line + safety line + face frame
 ```
 
 ## Hardware
@@ -25,9 +26,10 @@ sprayplot_firmware/
 - Laser diode module, driven via LEDC PWM — pin 21
 
 **Robot**
-- ESP32 dev board (can be the same board driving motion/spray, or a
-  dedicated one — `fuseWithOdometry()` is left as a stub either way)
+- ESP32 dev board (can be the same board driving motion/spray, or a dedicated one)
 - Photodiode + transimpedance amp feeding an ADC1 pin — pin 34
+- Face motion: free-rolling wheels + rail trolley hoist + independent safety line
+  (see `MOTION.md`). Encoder tick scales start at 0 until the drums exist.
 
 ## Before flashing
 
@@ -86,9 +88,12 @@ see oscillation, then back off by roughly a third.
 
 ## Known gaps
 
-- `fuseWithOdometry()` in `robot_receiver.ino` is an intentional stub —
-  it needs the motion board's pose representation before it can do
-  anything.
+- Encoder inputs (`rail_ticks`, `winch_ticks`, `wheel_ticks`) are declared
+  but not attached to hardware. Set `MM_PER_*_TICK` once the drums and
+  wheels exist; until then the fuse rides a stationary prior plus the
+  locked laser residual.
+- `MM_PER_DEG_AZ` / `MM_PER_DEG_EL` are a 3 m standoff guess. Replace with
+  a real base-to-wall extrinsic after the first mapped envelope.
 - The Goertzel normalization constant (`GOERTZEL_N * 2048.0f`) assumes a
   12-bit ADC with a photodiode signal roughly centered mid-scale; rescale
   after checking real signal levels on your photodiode/amp combination.
