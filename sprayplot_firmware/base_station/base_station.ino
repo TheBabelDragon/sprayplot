@@ -69,6 +69,9 @@ static volatile float last_amp = 0.0f;
 static volatile uint32_t last_amp_ms = 0;
 static volatile uint32_t last_amp_seq = 0;
 
+static volatile bool have_pose = false;
+static PosePacket last_pose{};
+
 static uint8_t state = STATE_BOUNDARY_MAP;
 
 static constexpr int MAX_POINTS = 16;
@@ -118,7 +121,6 @@ static void applyServos() {
   float lo_el = envelope_ready ? env_el_min : SERVO_MIN_DEG;
   float hi_el = envelope_ready ? env_el_max : SERVO_MAX_DEG;
 
-  // Hard stops always include the mechanical servo limits.
   lo_az = fmaxf(lo_az, SERVO_MIN_DEG);
   hi_az = fminf(hi_az, SERVO_MAX_DEG);
   lo_el = fmaxf(lo_el, SERVO_MIN_DEG);
@@ -178,7 +180,6 @@ static void finishMapping() {
     env_el_min = fminf(env_el_min, pts_el[i]);
     env_el_max = fmaxf(env_el_max, pts_el[i]);
   }
-  // Small pad so the lock loop can dither at the edge.
   const float pad = DITHER_DEG + 0.5f;
   env_az_min = clampf(env_az_min - pad, SERVO_MIN_DEG, SERVO_MAX_DEG);
   env_az_max = clampf(env_az_max + pad, SERVO_MIN_DEG, SERVO_MAX_DEG);
@@ -213,12 +214,22 @@ static void onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len
 static void onRecv(const uint8_t *mac, const uint8_t *data, int len) {
   (void)mac;
 #endif
-  if (len < (int)sizeof(AmplitudePacket)) return;
-  const AmplitudePacket *p = reinterpret_cast<const AmplitudePacket *>(data);
-  if (p->version != PROTO_VERSION || p->type != PKT_AMPLITUDE) return;
-  last_amp = p->amplitude;
-  last_amp_ms = millis();
-  last_amp_seq = p->seq;
+  if (len < 2) return;
+  const uint8_t type = data[1];
+  if (type == PKT_AMPLITUDE) {
+    if (len < (int)sizeof(AmplitudePacket)) return;
+    const AmplitudePacket *p = reinterpret_cast<const AmplitudePacket *>(data);
+    if (p->version < 1 || p->version > PROTO_VERSION) return;
+    last_amp = p->amplitude;
+    last_amp_ms = millis();
+    last_amp_seq = p->seq;
+  } else if (type == PKT_POSE) {
+    if (len < (int)sizeof(PosePacket)) return;
+    const PosePacket *p = reinterpret_cast<const PosePacket *>(data);
+    if (p->version < 1 || p->version > PROTO_VERSION) return;
+    last_pose = *p;
+    have_pose = true;
+  }
 }
 
 static void sendBearing() {
@@ -236,10 +247,16 @@ static void sendBearing() {
 
 static void printStatus() {
   const bool aligned = last_amp >= ALIGN_THRESHOLD;
-  Serial.printf("az=%6.2f  el=%6.2f  step=%.2f  amp=%5.2f  pts=%d  %s%s\n",
+  Serial.printf("az=%6.2f  el=%6.2f  step=%.2f  amp=%5.2f  pts=%d  %s%s",
                 az_deg, el_deg, jog_step, (float)last_amp, n_pts,
                 stateName(state),
                 aligned ? "  <-- ALIGNED" : "");
+  if (have_pose) {
+    Serial.printf("  face x=%.0f y=%.0f th=%.2f s=%.0f l=%.0f",
+                  last_pose.x_mm, last_pose.y_mm, last_pose.th_rad,
+                  last_pose.s_mm, last_pose.l_mm);
+  }
+  Serial.println();
 }
 
 static void handleMapKey(char c) {
@@ -306,8 +323,6 @@ static void stepSearch() {
 }
 
 static void stepTrack(uint32_t now) {
-  const float dt = 0.01f;  // loop is not hard real-time; phase is wall-clock based
-  (void)dt;
   dither_phase += 2.0f * PI * DITHER_HZ * (1.0f / 200.0f);
   if (dither_phase > 2.0f * PI) dither_phase -= 2.0f * PI;
 
@@ -319,7 +334,6 @@ static void stepTrack(uint32_t now) {
   az_deg += TRACK_GAIN * err * cosf(dither_phase);
   el_deg += TRACK_GAIN * err * sinf(dither_phase);
 
-  // Command the dithered pointing so the gradient stays observable.
   const float cmd_az = az_deg + DITHER_DEG * cosf(dither_phase);
   const float cmd_el = el_deg + DITHER_DEG * sinf(dither_phase);
 
